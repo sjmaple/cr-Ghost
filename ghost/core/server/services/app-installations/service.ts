@@ -4,7 +4,9 @@ import type { Knex } from 'knex';
 import { z } from 'zod';
 import type { AppManifest } from '@tryghost/app-contracts/manifest';
 import { DbDate, toDatabaseDate } from '../../lib/db-types/date';
-import type { RecordAppInstallationAction, RequestContext } from './actions';
+import type { RequestContext } from '../../lib/actor';
+import type { ChangeEvents } from '../../lib/change-events';
+import type { AppInstallationEvent } from './events';
 import {
   AppInstallationRow,
   CurrentInstallationRow,
@@ -262,22 +264,25 @@ export async function keepManifest(
 
 export class AppInstallationsService {
   private knex: Knex;
-  private recordAction: RecordAppInstallationAction;
+  /** Lets other services react to the changes this service makes. */
+  readonly events: Pick<ChangeEvents<AppInstallationEvent>, 'react'>;
+  private readonly raise: ChangeEvents<AppInstallationEvent>['raise'];
   private loadManifest: LoadManifest;
   /** Re-checks in progress, by installation ID. Sessions that start together share one. */
   private rechecking = new Map<string, Promise<void>>();
 
   constructor({
     knex,
-    recordAction,
+    events,
     loadManifest,
   }: {
     knex: Knex;
-    recordAction: RecordAppInstallationAction;
+    events: ChangeEvents<AppInstallationEvent>;
     loadManifest: LoadManifest;
   }) {
     this.knex = knex;
-    this.recordAction = recordAction;
+    this.events = events;
+    this.raise = events.raise;
     this.loadManifest = loadManifest;
   }
 
@@ -495,13 +500,9 @@ export class AppInstallationsService {
       }
     }
 
-    await this.recordAction({
-      context,
-      event: 'installed',
-      subject: id,
-      details: { primary_name: manifest.name, app_id: manifest.id },
-    });
-    return z.decode(AppInstallationRow, written);
+    const installed = z.decode(AppInstallationRow, written);
+    await this.raise(context.actor, { type: 'AppInstalled', change: 'added', next: installed });
+    return installed;
   }
 
   /**
@@ -560,20 +561,18 @@ export class AppInstallationsService {
         errorDetails: await this.previewOf(loaded),
       });
     }
+    const updated = await this.read(id);
     if (approved) {
-      await this.recordAction({
-        context,
-        event: 'changes_approved',
-        subject: id,
-        details: {
-          primary_name: loaded.manifest.name,
-          app_id: loaded.manifest.id,
-          from_manifest_id: approved.from,
-          to_manifest_id: approved.to,
-        },
+      await this.raise(context.actor, {
+        type: 'AppChangesApproved',
+        change: 'edited',
+        previous: installation,
+        next: updated,
+        fromManifestId: approved.from,
+        toManifestId: approved.to,
       });
     }
-    return this.read(id);
+    return updated;
   }
 
   /**
@@ -705,11 +704,10 @@ export class AppInstallationsService {
       return;
     }
 
-    await this.recordAction({
-      context,
-      event: 'uninstalled',
-      subject: id,
-      details: { primary_name: installation.manifest.name, app_id: installation.app_id },
+    await this.raise(context.actor, {
+      type: 'AppUninstalled',
+      change: 'deleted',
+      previous: installation,
     });
   }
 }

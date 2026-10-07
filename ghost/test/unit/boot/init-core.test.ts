@@ -28,6 +28,7 @@ function createCoreHarness() {
     './server/services/app-installations': { default: { init() {} } },
     './server/services/export-requests': { default: { init() {} } },
     './server/services/stripe-checkout-config': { init() {} },
+    './server/services/action-log': { default: { init() {} } },
   });
   return {
     init: (): Promise<void> => initCore({ config: { get: () => ({}) } }),

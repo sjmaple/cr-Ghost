@@ -6,7 +6,8 @@ import {
   AppInstallationsService,
   keepManifest,
 } from '../../../../../core/server/services/app-installations/service';
-import type { RecordAppInstallationAction } from '../../../../../core/server/services/app-installations/actions';
+import { createChangeEvents } from '../../../../../core/server/lib/change-events';
+import type { AppInstallationEvent } from '../../../../../core/server/services/app-installations/events';
 import type { CurrentInstallation } from '../../../../../core/server/services/app-installations/codec';
 import type {
   AppManifestChange,
@@ -43,15 +44,22 @@ function setup() {
   const transaction = vi.fn(async (write: (connection: Knex.Transaction) => Promise<void>) => {
     await write(trx as unknown as Knex.Transaction);
   });
-  const recordAction = vi.fn<RecordAppInstallationAction>().mockResolvedValue(undefined);
+  const events = createChangeEvents<AppInstallationEvent>({ logging: { error: vi.fn() } });
+  const raised: AppInstallationEvent[] = [];
+  events.react(async (_actor, event) => {
+    raised.push(event);
+  });
   const service = new AppInstallationsService({
     knex: { transaction } as unknown as Knex,
-    recordAction,
+    events,
     loadManifest: vi.fn<LoadManifest>().mockResolvedValue(loaded),
   });
   const install = () =>
-    service.create({ actor: null }, { manifestUrl: loaded.manifestUrl, digest: loaded.digest });
-  return { install, insert, trx, transaction, recordAction };
+    service.create(
+      { actor: { id: 'staff-id', type: 'user' } },
+      { manifestUrl: loaded.manifestUrl, digest: loaded.digest },
+    );
+  return { install, insert, trx, transaction, raised };
 }
 
 describe('App installation storage', function () {
@@ -79,7 +87,7 @@ describe('App installation storage', function () {
 
 describe('App installation transaction failures', function () {
   it('restarts the whole transaction when its manifest insert deadlocks', async function () {
-    const { install, insert, trx, transaction, recordAction } = setup();
+    const { install, insert, trx, transaction, raised } = setup();
     insert.mockResolvedValueOnce([]).mockRejectedValueOnce(deadlock());
 
     const installed = await install();
@@ -96,12 +104,14 @@ describe('App installation transaction failures', function () {
     );
     assert.deepEqual(insert.mock.calls[0], insert.mock.calls[2]);
     assert.deepEqual(insert.mock.calls[1], insert.mock.calls[3]);
-    assert.equal(recordAction.mock.calls.length, 1);
-    assert.equal(recordAction.mock.calls[0][0].subject, installed.id);
+    assert.deepEqual(
+      raised.map((event) => (event.type === 'AppInstalled' ? event.next.id : event.type)),
+      [installed.id],
+    );
   });
 
   it('reports a conflict when a retried install encounters the winner', async function () {
-    const { install, transaction, recordAction } = setup();
+    const { install, transaction, raised } = setup();
     transaction
       .mockRejectedValueOnce(deadlock())
       .mockRejectedValueOnce(Object.assign(new Error('Duplicate app'), { code: 'ER_DUP_ENTRY' }));
@@ -111,39 +121,39 @@ describe('App installation transaction failures', function () {
       code: 'APP_ALREADY_INSTALLED',
     });
     assert.equal(transaction.mock.calls.length, 2);
-    assert.equal(recordAction.mock.calls.length, 0);
+    assert.equal(raised.length, 0);
   });
 
   it('can recover from both retryable failures within the three-attempt bound', async function () {
-    const { install, transaction, recordAction } = setup();
+    const { install, transaction, raised } = setup();
     transaction.mockRejectedValueOnce(deadlock()).mockRejectedValueOnce(deadlock());
 
     await install();
 
     assert.equal(transaction.mock.calls.length, 3);
-    assert.equal(recordAction.mock.calls.length, 1);
+    assert.equal(raised.length, 1);
   });
 
   it('propagates the last deadlock after three attempts without recording an install', async function () {
-    const { install, transaction, recordAction } = setup();
+    const { install, transaction, raised } = setup();
     const error = deadlock();
     transaction.mockRejectedValue(error);
 
     await assert.rejects(install(), (reason) => reason === error);
 
     assert.equal(transaction.mock.calls.length, 3);
-    assert.equal(recordAction.mock.calls.length, 0);
+    assert.equal(raised.length, 0);
   });
 
   it('does not retry unrelated database errors', async function () {
-    const { install, transaction, recordAction } = setup();
+    const { install, transaction, raised } = setup();
     const error = Object.assign(new Error('Connection lost'), { code: 'ECONNRESET' });
     transaction.mockRejectedValue(error);
 
     await assert.rejects(install(), (reason) => reason === error);
 
     assert.equal(transaction.mock.calls.length, 1);
-    assert.equal(recordAction.mock.calls.length, 0);
+    assert.equal(raised.length, 0);
   });
 });
 

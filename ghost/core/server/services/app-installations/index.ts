@@ -7,15 +7,12 @@ import {
   isInDevelopmentTable,
   shouldCreateInDevelopmentTables,
 } from '../../data/schema/in-development';
-import {
-  actingContext,
-  recordAppInstallationAction,
-  type RecordAppInstallationAction,
-} from './actions';
+import { createChangeEvents } from '../../lib/change-events';
+import type { AppInstallationEvent } from './events';
 import { createManifestLoader } from './load-manifest';
 import { AppInstallationsService } from './service';
 
-export type { RequestContext } from './actions';
+export type { RequestContext } from '../../lib/actor';
 export type { AppInstallation } from './codec';
 export type { AppInstallationPreview, AppSession } from './service';
 
@@ -36,22 +33,18 @@ function localhostAlias(): string | null {
   return AppsConfig.parse(config.get('apps') ?? {}).localhostAlias;
 }
 
-const extras = { actingContext, isAvailable };
+const extras = { isAvailable };
 
 // Constructed by init() at boot, not at import: knex is only available once the DB has connected.
 export default defineService(
   'App Installations',
   () => {
     const { knex } = require('../../data/db');
-    const models = require('../../models');
     const externalRequest = require('../../lib/request-external');
-
-    const recordAction: RecordAppInstallationAction = (input) =>
-      recordAppInstallationAction({ Action: models.Action, logging, ...input });
 
     return new AppInstallationsService({
       knex,
-      recordAction,
+      events: createChangeEvents<AppInstallationEvent>({ logging }),
       loadManifest: createManifestLoader({
         request: externalRequest,
         logging,

@@ -1,9 +1,11 @@
 import errors from '@tryghost/errors';
+import logging from '@tryghost/logging';
 import urlUtils from '../../../shared/url-utils';
 import * as metafields from '../members-metafields';
 import { CheckoutBrandingService } from './branding-service';
 import { CheckoutPreviewService, type PreviewableTier } from './preview-service';
-import { recordCheckoutConfigAction, type RecordCheckoutConfigAction } from './actions';
+import { createChangeEvents } from '../../lib/change-events';
+import type { CheckoutConfigEvent } from './events';
 import { StripeCheckoutConfigService } from './service';
 
 export { StripeCheckoutConfigService } from './service';
@@ -22,8 +24,8 @@ export {
   toCheckoutConfigResponse,
   toCheckoutPreviewResponse,
 } from './serializers';
-export { actingContext } from './actions';
-export type { RequestContext } from './actions';
+export { actingContext } from '../../lib/actor';
+export type { RequestContext } from '../../lib/actor';
 
 // Constructed by init() at boot, not at import: knex is only available once the DB has
 // connected.
@@ -37,17 +39,17 @@ export function init(): void {
   }
 
   const { knex } = require('../../data/db');
-  const models = require('../../models');
-
-  const recordAction: RecordCheckoutConfigAction = (input) =>
-    recordCheckoutConfigAction({ Action: models.Action, ...input });
   // Boot sets up the custom fields services first, as shipping saves into custom fields.
   if (!metafields.bindings) {
     throw new errors.IncorrectUsageError({
       message: 'The custom fields services must be set up before the Stripe Checkout config.',
     });
   }
-  service = new StripeCheckoutConfigService({ knex, recordAction, bindings: metafields.bindings });
+  service = new StripeCheckoutConfigService({
+    knex,
+    events: createChangeEvents<CheckoutConfigEvent>({ logging }),
+    bindings: metafields.bindings,
+  });
 
   // Looked up on each use: Stripe, tiers and members are set up later in boot.
   previewService = new CheckoutPreviewService({
